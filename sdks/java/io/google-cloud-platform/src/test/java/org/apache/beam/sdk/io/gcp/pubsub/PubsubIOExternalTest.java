@@ -150,7 +150,7 @@ public class PubsubIOExternalTest {
     RunnerApi.PTransform transform = result.getTransform();
     assertThat(
         transform.getSubtransformsList(),
-        Matchers.hasItem(MatchesPattern.matchesPattern(".*MapElements.*")));
+        Matchers.hasItem(MatchesPattern.matchesPattern(".*PreparePubsubWrite.*")));
     assertThat(
         transform.getSubtransformsList(),
         Matchers.hasItem(MatchesPattern.matchesPattern(".*PubsubUnboundedSink.*")));

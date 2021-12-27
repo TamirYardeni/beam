@@ -32,6 +32,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import javax.naming.SizeLimitExceededException;
@@ -130,12 +131,6 @@ public class PubsubIO {
   private static final int PUBSUB_NAME_MIN_LENGTH = 3;
   private static final int PUBSUB_NAME_MAX_LENGTH = 255;
 
-  // See https://cloud.google.com/pubsub/quotas#resource_limits.
-  private static final int PUBSUB_MESSAGE_DATA_MAX_LENGTH = 10 << 20;
-  private static final int PUBSUB_MESSAGE_MAX_ATTRIBUTES = 100;
-  private static final int PUBSUB_MESSAGE_ATTRIBUTE_MAX_KEY_LENGTH = 256;
-  private static final int PUBSUB_MESSAGE_ATTRIBUTE_MAX_VALUE_LENGTH = 1024;
-
   private static final String SUBSCRIPTION_RANDOM_TEST_PREFIX = "_random/";
   private static final String SUBSCRIPTION_STARTING_SIGNAL = "_starting_signal/";
   private static final String TOPIC_DEV_NULL_TEST_NAME = "/topics/dev/null";
@@ -168,48 +163,6 @@ public class PubsubIO {
           "Illegal Pubsub object name specified: "
               + name
               + " Please see Javadoc for naming rules.");
-    }
-  }
-
-  private static void validatePubsubMessage(PubsubMessage message)
-      throws SizeLimitExceededException {
-    if (message.getPayload().length > PUBSUB_MESSAGE_DATA_MAX_LENGTH) {
-      throw new SizeLimitExceededException(
-          "Pubsub message data field of length "
-              + message.getPayload().length
-              + " exceeds maximum of "
-              + PUBSUB_MESSAGE_DATA_MAX_LENGTH
-              + ". See https://cloud.google.com/pubsub/quotas#resource_limits");
-    }
-    @Nullable Map<String, String> attributes = message.getAttributeMap();
-    if (attributes != null) {
-      if (attributes.size() > PUBSUB_MESSAGE_MAX_ATTRIBUTES) {
-        throw new SizeLimitExceededException(
-            "Pubsub message contains "
-                + attributes.size()
-                + " attributes which exceeds the maximum of "
-                + PUBSUB_MESSAGE_MAX_ATTRIBUTES
-                + ". See https://cloud.google.com/pubsub/quotas#resource_limits");
-      }
-      for (Map.Entry<String, String> attribute : attributes.entrySet()) {
-        if (attribute.getKey().length() > PUBSUB_MESSAGE_ATTRIBUTE_MAX_KEY_LENGTH) {
-          throw new SizeLimitExceededException(
-              "Pubsub message attribute key "
-                  + attribute.getKey()
-                  + " exceeds the maximum of "
-                  + PUBSUB_MESSAGE_ATTRIBUTE_MAX_KEY_LENGTH
-                  + ". See https://cloud.google.com/pubsub/quotas#resource_limits");
-        }
-        String value = attribute.getValue();
-        if (value.length() > PUBSUB_MESSAGE_ATTRIBUTE_MAX_VALUE_LENGTH) {
-          throw new SizeLimitExceededException(
-              "Pubsub message attribute value starting with "
-                  + value.substring(0, Math.min(256, value.length()))
-                  + " exceeds the maximum of "
-                  + PUBSUB_MESSAGE_ATTRIBUTE_MAX_VALUE_LENGTH
-                  + ". See https://cloud.google.com/pubsub/quotas#resource_limits");
-        }
-      }
     }
   }
 
@@ -1196,12 +1149,16 @@ public class PubsubIO {
     @Override
     public PDone expand(PCollection<T> input) {
       if (getTopicProvider() == null) {
-        throw new IllegalStateException("need to set the topic of a PubsubIO.Write transform");
+        throw new IllegalStateException(
+            "need to set the default topic of a PubsubIO.Write transform");
       }
+
+      PCollection<PubsubMessage> pubsubMessages =
+          input.apply(new PreparePubsubWrite<>(getTopicProvider(), getFormatFn()));
 
       switch (input.isBounded()) {
         case BOUNDED:
-          input.apply(
+          pubsubMessages.apply(
               ParDo.of(
                   new PubsubBoundedWriter(
                       MoreObjects.firstNonNull(getMaxBatchSize(), MAX_PUBLISH_BATCH_SIZE),
@@ -1209,31 +1166,17 @@ public class PubsubIO {
                           getMaxBatchBytesSize(), MAX_PUBLISH_BATCH_BYTE_SIZE_DEFAULT))));
           return PDone.in(input.getPipeline());
         case UNBOUNDED:
-          return input
-              .apply(
-                  MapElements.into(new TypeDescriptor<PubsubMessage>() {})
-                      .via(
-                          elem -> {
-                            PubsubMessage message = getFormatFn().apply(elem);
-                            try {
-                              validatePubsubMessage(message);
-                            } catch (SizeLimitExceededException e) {
-                              throw new IllegalArgumentException(e);
-                            }
-                            return message;
-                          }))
-              .apply(
-                  new PubsubUnboundedSink(
-                      getPubsubClientFactory(),
-                      NestedValueProvider.of(getTopicProvider(), new TopicPathTranslator()),
-                      getTimestampAttribute(),
-                      getIdAttribute(),
-                      100 /* numShards */,
-                      MoreObjects.firstNonNull(
-                          getMaxBatchSize(), PubsubUnboundedSink.DEFAULT_PUBLISH_BATCH_SIZE),
-                      MoreObjects.firstNonNull(
-                          getMaxBatchBytesSize(),
-                          PubsubUnboundedSink.DEFAULT_PUBLISH_BATCH_BYTES)));
+          return pubsubMessages.apply(
+              new PubsubUnboundedSink(
+                  getPubsubClientFactory(),
+                  NestedValueProvider.of(getTopicProvider(), new TopicPathTranslator()),
+                  getTimestampAttribute(),
+                  getIdAttribute(),
+                  100 /* numShards */,
+                  MoreObjects.firstNonNull(
+                      getMaxBatchSize(), PubsubUnboundedSink.DEFAULT_PUBLISH_BATCH_SIZE),
+                  MoreObjects.firstNonNull(
+                      getMaxBatchBytesSize(), PubsubUnboundedSink.DEFAULT_PUBLISH_BATCH_BYTES)));
       }
       throw new RuntimeException(); // cases are exhaustive.
     }
@@ -1250,13 +1193,22 @@ public class PubsubIO {
      *
      * <p>Public so can be suppressed by runners.
      */
-    public class PubsubBoundedWriter extends DoFn<T, Void> {
-      private transient List<OutgoingMessage> output;
+    public class PubsubBoundedWriter extends DoFn<PubsubMessage, Void> {
       private transient PubsubClient pubsubClient;
-      private transient int currentOutputBytes;
+      private transient ConcurrentHashMap<PubsubTopic, PubsubMessageOutput> outputToTopic;
 
       private int maxPublishBatchByteSize;
       private int maxPublishBatchSize;
+
+      public class PubsubMessageOutput {
+        public List<OutgoingMessage> output;
+        public int currentOutputBytes;
+
+        public PubsubMessageOutput() {
+          this.output = new ArrayList<>();
+          this.currentOutputBytes = 0;
+        }
+      }
 
       PubsubBoundedWriter(int maxPublishBatchSize, int maxPublishBatchByteSize) {
         this.maxPublishBatchSize = maxPublishBatchSize;
@@ -1269,8 +1221,7 @@ public class PubsubIO {
 
       @StartBundle
       public void startBundle(StartBundleContext c) throws IOException {
-        this.output = new ArrayList<>();
-        this.currentOutputBytes = 0;
+        this.outputToTopic = new ConcurrentHashMap<>();
 
         // NOTE: idAttribute is ignored.
         this.pubsubClient =
@@ -1282,8 +1233,7 @@ public class PubsubIO {
       @ProcessElement
       public void processElement(ProcessContext c) throws IOException, SizeLimitExceededException {
         byte[] payload;
-        PubsubMessage message = getFormatFn().apply(c.element());
-        validatePubsubMessage(message);
+        PubsubMessage message = c.element();
         payload = message.getPayload();
         Map<String, String> attributes = message.getAttributeMap();
 
@@ -1295,14 +1245,19 @@ public class PubsubIO {
           throw new SizeLimitExceededException(msg);
         }
 
+        PubsubTopic topic = PubsubTopic.fromPath(message.getTopicPath());
+        PubsubMessageOutput pubsubMessageOutput =
+            outputToTopic.computeIfAbsent(
+                topic, elem -> outputToTopic.put(elem, new PubsubMessageOutput()));
+
         // Checking before adding the message stops us from violating the max bytes
-        if (((currentOutputBytes + payload.length) >= maxPublishBatchByteSize)
-            || (output.size() >= maxPublishBatchSize)) {
-          publish();
+        if (((pubsubMessageOutput.currentOutputBytes + payload.length) >= maxPublishBatchByteSize)
+            || (pubsubMessageOutput.output.size() >= maxPublishBatchSize)) {
+          publish(pubsubMessageOutput);
         }
 
         // NOTE: The record id is always null.
-        output.add(
+        pubsubMessageOutput.output.add(
             OutgoingMessage.of(
                 com.google.pubsub.v1.PubsubMessage.newBuilder()
                     .setData(ByteString.copyFrom(payload))
@@ -1310,28 +1265,29 @@ public class PubsubIO {
                     .build(),
                 c.timestamp().getMillis(),
                 null));
-        currentOutputBytes += payload.length;
+        pubsubMessageOutput.currentOutputBytes += payload.length;
       }
 
       @FinishBundle
       public void finishBundle() throws IOException {
-        if (!output.isEmpty()) {
-          publish();
+        for (PubsubMessageOutput pubsubMessageOutput : outputToTopic.values()) {
+          if (!pubsubMessageOutput.output.isEmpty()) {
+            publish(pubsubMessageOutput);
+          }
         }
-        output = null;
-        currentOutputBytes = 0;
+        outputToTopic = null;
         pubsubClient.close();
         pubsubClient = null;
       }
 
-      private void publish() throws IOException {
+      private void publish(PubsubMessageOutput outputMessage) throws IOException {
         PubsubTopic topic = getTopicProvider().get();
         int n =
             pubsubClient.publish(
-                PubsubClient.topicPathFromName(topic.project, topic.topic), output);
-        checkState(n == output.size());
-        output.clear();
-        currentOutputBytes = 0;
+                PubsubClient.topicPathFromName(topic.project, topic.topic), outputMessage.output);
+        checkState(n == outputMessage.output.size());
+        outputMessage.output.clear();
+        outputMessage.currentOutputBytes = 0;
       }
 
       @Override

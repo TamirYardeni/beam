@@ -40,21 +40,34 @@ public class PubsubMessage {
 
     abstract @Nullable String getMessageId();
 
+    abstract @Nullable String getTopicPath();
+
     static Impl create(
-        byte[] payload, @Nullable Map<String, String> attributes, @Nullable String messageId) {
-      return new AutoValue_PubsubMessage_Impl(payload, attributes, messageId);
+        byte[] payload,
+        @Nullable Map<String, String> attributes,
+        @Nullable String messageId,
+        @Nullable String topicPath) {
+      return new AutoValue_PubsubMessage_Impl(payload, attributes, messageId, topicPath);
     }
   }
 
   private Impl impl;
 
   public PubsubMessage(byte[] payload, @Nullable Map<String, String> attributes) {
-    this(payload, attributes, null);
+    this(payload, attributes, null, null);
   }
 
   public PubsubMessage(
       byte[] payload, @Nullable Map<String, String> attributes, @Nullable String messageId) {
-    impl = Impl.create(payload, attributes, messageId);
+    this(payload, attributes, messageId, null);
+  }
+
+  public PubsubMessage(
+      byte[] payload,
+      @Nullable Map<String, String> attributes,
+      @Nullable String messageId,
+      @Nullable String topic) {
+    impl = Impl.create(payload, attributes, messageId, topic);
   }
 
   /** Returns the main PubSub message. */
@@ -76,6 +89,11 @@ public class PubsubMessage {
   /** Returns the messageId of the message populated by Cloud Pub/Sub. */
   public @Nullable String getMessageId() {
     return impl.getMessageId();
+  }
+
+  /** Returns the full topic path of the message. */
+  public @Nullable String getTopicPath() {
+    return impl.getTopicPath();
   }
 
   @Override

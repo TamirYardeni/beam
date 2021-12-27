@@ -20,38 +20,41 @@ package org.apache.beam.sdk.io.gcp.pubsub;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.util.Map;
 import org.apache.beam.sdk.coders.ByteArrayCoder;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.CustomCoder;
+import org.apache.beam.sdk.coders.MapCoder;
+import org.apache.beam.sdk.coders.NullableCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
-import org.apache.beam.vendor.guava.v26_0_jre.com.google.common.collect.ImmutableMap;
 
-/**
- * A coder for PubsubMessage treating the raw bytes being decoded as the message's payload, with the
- * message id from the PubSub server.
- */
-@SuppressWarnings({
-  "nullness" // TODO(https://issues.apache.org/jira/browse/BEAM-10402)
-})
-public class PubsubMessageWithMessageIdCoder extends CustomCoder<PubsubMessage> {
+public class PubsubMessageCoder extends CustomCoder<PubsubMessage> {
+
+  // A message's payload cannot be null
   private static final Coder<byte[]> PAYLOAD_CODER = ByteArrayCoder.of();
-  // A message's messageId cannot be null
-  private static final Coder<String> MESSAGE_ID_CODER = StringUtf8Coder.of();
+  private static final Coder<Map<String, String>> ATTRIBUTES_CODER =
+      NullableCoder.of(MapCoder.of(StringUtf8Coder.of(), StringUtf8Coder.of()));
+  private static final Coder<String> MESSAGE_ID_CODER = NullableCoder.of(StringUtf8Coder.of());
+  private static final Coder<String> TOPIC_CODER = NullableCoder.of(StringUtf8Coder.of());
 
-  public static PubsubMessageWithMessageIdCoder of() {
-    return new PubsubMessageWithMessageIdCoder();
+  public static PubsubMessageCoder of() {
+    return new PubsubMessageCoder();
   }
 
   @Override
   public void encode(PubsubMessage value, OutputStream outStream) throws IOException {
-    PAYLOAD_CODER.encode(value.getPayload(), outStream);
-    MESSAGE_ID_CODER.encode(value.getMessageId(), outStream);
+    PAYLOAD_CODER.encode(value.getPayload(), outStream, Context.NESTED);
+    ATTRIBUTES_CODER.encode(value.getAttributeMap(), outStream, Context.NESTED);
+    MESSAGE_ID_CODER.encode(value.getMessageId(), outStream, Context.NESTED);
+    TOPIC_CODER.encode(value.getTopicPath(), outStream, Context.NESTED);
   }
 
   @Override
   public PubsubMessage decode(InputStream inStream) throws IOException {
-    byte[] payload = PAYLOAD_CODER.decode(inStream);
-    String messageId = MESSAGE_ID_CODER.decode(inStream);
-    return new PubsubMessage(payload, ImmutableMap.of(), messageId, null);
+    byte[] payload = PAYLOAD_CODER.decode(inStream, Context.NESTED);
+    Map<String, String> attributes = ATTRIBUTES_CODER.decode(inStream, Context.NESTED);
+    String messageId = MESSAGE_ID_CODER.decode(inStream, Context.NESTED);
+    String topic = TOPIC_CODER.decode(inStream, Context.NESTED);
+    return new PubsubMessage(payload, attributes, messageId, topic);
   }
 }

@@ -47,7 +47,8 @@ import org.junit.runners.JUnit4;
 /** Test PubsubUnboundedSink. */
 @RunWith(JUnit4.class)
 public class PubsubUnboundedSinkTest implements Serializable {
-  private static final TopicPath TOPIC = PubsubClient.topicPathFromName("testProject", "testTopic");
+  private static final TopicPath TOPIC =
+      PubsubClient.topicPathFromName("test-project", "testTopic");
   private static final String DATA = "testData";
   private static final ImmutableMap<String, String> ATTRIBUTES =
       ImmutableMap.<String, String>builder().put("a", "b").put("c", "d").build();
@@ -70,7 +71,8 @@ public class PubsubUnboundedSinkTest implements Serializable {
     @ProcessElement
     public void processElement(ProcessContext c) {
       c.outputWithTimestamp(
-          new PubsubMessage(c.element().getBytes(StandardCharsets.UTF_8), attributes),
+          new PubsubMessage(
+              c.element().getBytes(StandardCharsets.UTF_8), attributes, null, TOPIC.getPath()),
           new Instant(TIMESTAMP));
     }
   }
@@ -120,7 +122,10 @@ public class PubsubUnboundedSinkTest implements Serializable {
               batchBytes,
               Duration.standardSeconds(2),
               RecordIdMethod.DETERMINISTIC);
-      p.apply(Create.of(ImmutableList.of(DATA))).apply(ParDo.of(new Stamp(ATTRIBUTES))).apply(sink);
+      p.apply(Create.of(ImmutableList.of(DATA)))
+          .apply(ParDo.of(new Stamp(ATTRIBUTES)))
+          .setCoder(PubsubMessageCoder.of())
+          .apply(sink);
       p.run();
     }
     // The PubsubTestClientFactory will assert fail on close if the actual published
@@ -152,6 +157,7 @@ public class PubsubUnboundedSinkTest implements Serializable {
               RecordIdMethod.DETERMINISTIC);
       p.apply(Create.of(ImmutableList.of(DATA)))
           .apply(ParDo.of(new Stamp(null /* attributes */)))
+          .setCoder(PubsubMessageCoder.of())
           .apply(sink);
       p.run();
     }
@@ -189,7 +195,10 @@ public class PubsubUnboundedSinkTest implements Serializable {
               batchBytes,
               Duration.standardSeconds(2),
               RecordIdMethod.DETERMINISTIC);
-      p.apply(Create.of(data)).apply(ParDo.of(new Stamp())).apply(sink);
+      p.apply(Create.of(data))
+          .apply(ParDo.of(new Stamp()))
+          .setCoder(PubsubMessageCoder.of())
+          .apply(sink);
       p.run();
     }
     // The PubsubTestClientFactory will assert fail on close if the actual published
@@ -232,7 +241,10 @@ public class PubsubUnboundedSinkTest implements Serializable {
               batchBytes,
               Duration.standardSeconds(2),
               RecordIdMethod.DETERMINISTIC);
-      p.apply(Create.of(data)).apply(ParDo.of(new Stamp())).apply(sink);
+      p.apply(Create.of(data))
+          .apply(ParDo.of(new Stamp()))
+          .setCoder(PubsubMessageCoder.of())
+          .apply(sink);
       p.run();
     }
     // The PubsubTestClientFactory will assert fail on close if the actual published
